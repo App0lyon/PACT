@@ -222,9 +222,3 @@ If you use this repo, please cite the original paper:
   year={2018}
 }
 ```
-
----
-
-## License
-
-No explicit license file was found in this repository at the time of writing. If you intend to share or modify the code, please add a suitable `LICENSE` file.
