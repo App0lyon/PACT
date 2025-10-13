@@ -2,6 +2,9 @@ import os
 import json
 from datetime import datetime
 
+import torch
+
+
 class Logger:
     def __init__(self, save_dir):
         self.save_dir = save_dir
@@ -13,25 +16,33 @@ class Logger:
 
     def _log(self, msg):
         print(msg)
-        with open(self.log_file, "a") as f:
+        with open(self.log_file, "a", encoding="utf-8") as f:
             f.write(msg + "\n")
 
     def log(self, msg):
         self._log(msg)
 
     def log_metrics(self, epoch, train_loss, val_loss, acc):
-        entry = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, "acc": acc}
+        entry = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "acc": acc,
+        }
         self.metrics.append(entry)
-        with open(self.metrics_file, "w") as f:
+        with open(self.metrics_file, "w", encoding="utf-8") as f:
             json.dump(self.metrics, f, indent=2)
 
     def save_checkpoint(self, model, optimizer, epoch, is_best=False):
         ckpt_path = os.path.join(self.save_dir, f"checkpoint_epoch{epoch}.pth")
-        torch.save({
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-        }, ckpt_path)
+        torch.save(
+            {
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+            },
+            ckpt_path,
+        )
         if is_best:
             best_path = os.path.join(self.save_dir, "best_model.pth")
             torch.save(model.state_dict(), best_path)

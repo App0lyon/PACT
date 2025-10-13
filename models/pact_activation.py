@@ -20,7 +20,7 @@ def _quantize_uniform_with_ste(x, k, alpha):
         return x
     n = 2 ** k - 1
     # On suppose x déjà clampé dans [0, alpha]
-    scale = n / alpha
+    scale = n / alpha.detach()
     # round with STE
     y_int = _RoundSTE.apply(x * scale)
     y = y_int / scale
