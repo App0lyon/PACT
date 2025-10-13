@@ -2,6 +2,21 @@ import torch
 import torch.nn as nn
 from models.pact_activation import PACTActivation
 
+
+class _FullPrecisionReLU(nn.ReLU):
+    def __init__(self):
+        super().__init__(inplace=False)
+        self.bit_width = None
+
+
+class _IdentityActivation(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.bit_width = None
+
+    def forward(self, x):
+        return x
+
 def quantize_weights(w, k):
     """
     Quantification uniforme des poids dans [-1, 1].
@@ -30,7 +45,7 @@ class QuantConv2d(nn.Module):
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, bias=False)
         self.bn = nn.BatchNorm2d(out_channels)
         if bit_width_a is None:
-            self.act = nn.ReLU(inplace=False)
+            self.act = _FullPrecisionReLU()
         else:
             self.act = PACTActivation(bit_width=bit_width_a, init_alpha=init_alpha)
 
@@ -54,10 +69,11 @@ class QuantLinear(nn.Module):
         self.act = None
         if bit_width_a is not None:
             self.act = PACTActivation(bit_width=bit_width_a, init_alpha=init_alpha)
+        else:
+            self.act = _IdentityActivation()
 
     def forward(self, x):
         w_q = quantize_weights(self.fc.weight, self.bit_width_w)
         x = nn.functional.linear(x, w_q, self.fc.bias)
-        if self.act is not None:
-            x = self.act(x)
+        x = self.act(x)
         return x
