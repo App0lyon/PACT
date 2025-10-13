@@ -1,0 +1,51 @@
+# =========================================
+#  PACT - CIFAR10 ResNet20 Configuration
+#  Source: Appendix B, Table 2 (PACT Paper)
+# =========================================
+
+experiment_name: "PACT_CIFAR10_ResNet20"
+dataset:
+  name: cifar10
+  image_size: 32
+  num_classes: 10
+  augmentations:
+    - random_crop
+    - random_horizontal_flip
+    - normalize
+
+model:
+  architecture: resnet20
+  activation: pact
+  pact:
+    bit_width: 4          # test also 2,3,5
+    init_alpha: 10.0
+    lambda_alpha: 0.0002  # same as weight decay
+    share_alpha: layer     # layer-wise alpha sharing
+    quantize_first_last: false
+
+training:
+  epochs: 200
+  batch_size: 128
+  optimizer: sgd
+  momentum: 0.9
+  weight_decay: 0.0002
+  learning_rate:
+    initial: 0.1
+    schedule:
+      milestones: [60, 120, 160]
+      gamma: 0.1
+  criterion: cross_entropy
+  regularization:
+    type: l2
+    alpha_reg: true
+
+logging:
+  save_dir: ./results/cifar10_resnet20/
+  log_interval: 50
+  save_best_only: true
+  plot_alpha_evolution: true
+  record_bitwidth_sweep: [2, 3, 4, 5]
+
+hardware:
+  device: cuda
+  num_workers: 4
