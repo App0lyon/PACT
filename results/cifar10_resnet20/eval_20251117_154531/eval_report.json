@@ -1,0 +1,17 @@
+{
+  "config": {
+    "experiment": "PACT_CIFAR10_ResNet20",
+    "arch": "resnet20",
+    "bit_width": 4,
+    "quantize_first_last": false,
+    "dataset": "cifar10"
+  },
+  "metrics": {
+    "loss": 0.581073482131958,
+    "top1": 80.79,
+    "top5": 99.04,
+    "n": 10000
+  },
+  "elapsed_sec": 10.269479036331177,
+  "checkpoint": "/home/charles-prioux/Documents/PACT/results/cifar10_resnet20/best_model.pth"
+}

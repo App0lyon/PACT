@@ -1,0 +1,35 @@
+Logging started: 2025-11-17 14:22:23.201683
+namespace(experiment_name='PACT_CIFAR10_ResNet20', dataset=namespace(name='cifar10', image_size=32, num_classes=10, augmentations=['random_crop', 'random_horizontal_flip', 'normalize']), model=namespace(architecture='resnet20', activation='pact', pact=namespace(bit_width=4, init_alpha=10.0, lambda_alpha=0.0002, share_alpha='layer', quantize_first_last=False)), training=namespace(epochs=200, batch_size=128, optimizer='sgd', momentum=0.9, weight_decay=0.0002, learning_rate=namespace(initial=0.1, schedule=namespace(milestones=[60, 120, 160], gamma=0.1)), criterion='cross_entropy', regularization=namespace(type='l2', alpha_reg=True)), logging=namespace(save_dir='./results/cifar10_resnet20/', log_interval=50, save_best_only=True, plot_alpha_evolution=True, record_bitwidth_sweep=[2, 3, 4, 5]), hardware=namespace(device='cuda', num_workers=4))
+Logging started: 2025-11-17 14:24:47.081802
+namespace(experiment_name='PACT_CIFAR10_ResNet20', dataset=namespace(name='cifar10', image_size=32, num_classes=10, augmentations=['random_crop', 'random_horizontal_flip', 'normalize']), model=namespace(architecture='resnet20', activation='pact', pact=namespace(bit_width=4, init_alpha=10.0, lambda_alpha=0.0002, share_alpha='layer', quantize_first_last=False)), training=namespace(epochs=20, batch_size=128, optimizer='sgd', momentum=0.9, weight_decay=0.0002, learning_rate=namespace(initial=0.1, schedule=namespace(milestones=[60, 120, 160], gamma=0.1)), criterion='cross_entropy', regularization=namespace(type='l2', alpha_reg=True)), logging=namespace(save_dir='./results/cifar10_resnet20/', log_interval=50, save_best_only=True, plot_alpha_evolution=True, record_bitwidth_sweep=[2, 3, 4, 5]), hardware=namespace(device='cuda', num_workers=4))
+[001/20] train_loss=2.0063 acc1=35.16 acc5=86.88 | val_loss=1.6222 acc1=40.05 acc5=90.46 | alpha_mean=7.929952939351399 | 159.1s
+✅ New best (Top-1 40.05) — saved to ./results/cifar10_resnet20/best_model.pth
+[002/20] train_loss=1.4375 acc1=54.14 acc5=94.59 | val_loss=1.2423 acc1=55.87 acc5=95.40 | alpha_mean=6.2607720957862005 | 161.1s
+✅ New best (Top-1 55.87) — saved to ./results/cifar10_resnet20/best_model.pth
+[003/20] train_loss=1.1305 acc1=63.25 acc5=96.68 | val_loss=0.9686 acc1=65.65 acc5=97.08 | alpha_mean=4.96776098675198 | 159.4s
+✅ New best (Top-1 65.65) — saved to ./results/cifar10_resnet20/best_model.pth
+[004/20] train_loss=0.9425 acc1=69.37 acc5=97.50 | val_loss=0.9734 acc1=67.58 acc5=97.01 | alpha_mean=4.015124400456746 | 160.4s
+✅ New best (Top-1 67.58) — saved to ./results/cifar10_resnet20/best_model.pth
+[005/20] train_loss=0.8073 acc1=73.37 acc5=98.22 | val_loss=1.0599 acc1=67.16 acc5=97.17 | alpha_mean=3.318153500556946 | 160.8s
+[006/20] train_loss=0.7340 acc1=75.79 acc5=98.46 | val_loss=0.7625 acc1=74.58 acc5=98.63 | alpha_mean=2.831718405087789 | 160.7s
+✅ New best (Top-1 74.58) — saved to ./results/cifar10_resnet20/best_model.pth
+[007/20] train_loss=0.6703 acc1=77.72 acc5=98.68 | val_loss=0.8531 acc1=72.10 acc5=97.98 | alpha_mean=2.48335470755895 | 162.4s
+[008/20] train_loss=0.6357 acc1=78.78 acc5=98.80 | val_loss=0.8039 acc1=73.50 acc5=98.37 | alpha_mean=2.2905201580789356 | 161.6s
+[009/20] train_loss=0.5996 acc1=79.87 acc5=98.96 | val_loss=0.7355 acc1=75.52 acc5=98.22 | alpha_mean=2.1432931423187256 | 162.2s
+✅ New best (Top-1 75.52) — saved to ./results/cifar10_resnet20/best_model.pth
+[010/20] train_loss=0.5803 acc1=80.57 acc5=99.03 | val_loss=0.7401 acc1=75.13 acc5=98.80 | alpha_mean=2.0463795529471502 | 162.1s
+[011/20] train_loss=0.5650 acc1=81.20 acc5=99.05 | val_loss=0.6832 acc1=77.03 acc5=98.89 | alpha_mean=1.9904813236660428 | 161.1s
+✅ New best (Top-1 77.03) — saved to ./results/cifar10_resnet20/best_model.pth
+[012/20] train_loss=0.5429 acc1=81.69 acc5=99.19 | val_loss=0.9661 acc1=70.23 acc5=98.09 | alpha_mean=1.9478187693489923 | 168.3s
+[013/20] train_loss=0.5313 acc1=82.18 acc5=99.15 | val_loss=0.5785 acc1=80.32 acc5=98.90 | alpha_mean=1.9428881605466206 | 185.1s
+✅ New best (Top-1 80.32) — saved to ./results/cifar10_resnet20/best_model.pth
+[014/20] train_loss=0.5102 acc1=82.92 acc5=99.21 | val_loss=0.7224 acc1=75.64 acc5=98.88 | alpha_mean=1.9002126918898687 | 160.9s
+[015/20] train_loss=0.5020 acc1=83.15 acc5=99.22 | val_loss=0.6387 acc1=78.87 acc5=98.91 | alpha_mean=1.9363477494981554 | 165.0s
+[016/20] train_loss=0.4914 acc1=83.62 acc5=99.32 | val_loss=0.6445 acc1=79.05 acc5=98.68 | alpha_mean=1.9243914352522955 | 161.6s
+[017/20] train_loss=0.4858 acc1=83.73 acc5=99.24 | val_loss=0.7526 acc1=75.69 acc5=98.40 | alpha_mean=1.8889230853981442 | 162.4s
+[018/20] train_loss=0.4787 acc1=83.98 acc5=99.28 | val_loss=0.5909 acc1=80.66 acc5=99.13 | alpha_mean=1.8976741698053148 | 163.4s
+✅ New best (Top-1 80.66) — saved to ./results/cifar10_resnet20/best_model.pth
+[019/20] train_loss=0.4658 acc1=84.41 acc5=99.31 | val_loss=0.6048 acc1=80.31 acc5=99.06 | alpha_mean=1.9147302210330963 | 160.6s
+[020/20] train_loss=0.4595 acc1=84.47 acc5=99.37 | val_loss=0.5811 acc1=80.79 acc5=99.04 | alpha_mean=1.9073595934444003 | 161.9s
+✅ New best (Top-1 80.79) — saved to ./results/cifar10_resnet20/best_model.pth
+Training finished.
