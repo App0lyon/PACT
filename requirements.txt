@@ -1,4 +1,3 @@
-onnx
 torch
 torchvision
-pyyaml
+tqdm

@@ -1,363 +1,207 @@
+from __future__ import annotations
+
 import argparse
 import os
-import math
-import time
-from datetime import datetime
 
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.cuda.amp import GradScaler, autocast
+from torch import nn, optim
 
-# --- Utils & Models ---
-from utils.config import load_config
-from utils.datasets import get_dataset
-from utils import logger as logger_module
-from utils.logger import Logger
-from utils.quant_utils import alpha_regularization
-
-from models.resnet_pact import resnet20_pact, resnet18_pact
-from models.quant_layers import QuantConv2d, QuantLinear
-import torch.nn.functional as F
+import models
+from data import cifar10_loaders, svhn_loaders, imagenet_loaders
+from train_utils import train_one_epoch, evaluate
+from pact import PACTActivation
 
 
-# ---- Helper: inject torch into utils.logger if needed (save_checkpoint uses torch) ----
-logger_module.torch = torch
+def parse_args():
+    parser = argparse.ArgumentParser(description="Full-precision baselines for PACT paper")
+    parser.add_argument("--dataset", choices=["cifar10", "svhn", "imagenet"], required=True)
+    parser.add_argument("--model", choices=["resnet20", "svhn_convnet", "alexnet_bn", "resnet18_preact", "resnet50_preact"], help="Model name")
+    parser.add_argument("--data-root", default="data", help="Dataset root")
+    parser.add_argument("--epochs", type=int)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--lr", type=float)
+    parser.add_argument("--momentum", type=float)
+    parser.add_argument("--weight-decay", type=float)
+    parser.add_argument("--lr-milestones", type=int, nargs="*")
+    parser.add_argument("--lr-gamma", type=float)
+    parser.add_argument("--lr-step", type=int, help="Step size for StepLR (used for SVHN/Adam)")
+    parser.add_argument("--lambda-alpha", type=float, help="L2 regularization strength for PACT alpha parameters (defaults to weight decay).")
+    parser.add_argument("--workers", type=int)
+    parser.add_argument("--output-dir", default=None, help="Optional directory to save checkpoints")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--act-bits", type=int, default=4, help="Activation quantization bits for PACT (set <=0 to disable quantization).")
+    parser.add_argument("--w-bits", type=int, default=4, help="Weight quantization bits (set <=0 to disable quantization).")
+    parser.add_argument("--quantize-first-last", action="store_true", help="Also quantize activations of the first and last layers.")
+    parser.add_argument("--quant-warmup-epochs", type=int, default=0, help="Number of initial epochs to train with PACT clipping but without quantization.")
+    parser.add_argument("--log-interval", type=int, default=50)
+    return parser.parse_args()
 
 
-# ---- Optional: ResNet50 (Bottleneck) with Quant layers for ImageNet ----
-class Bottleneck(nn.Module):
-    expansion = 4
-    def __init__(self, in_planes, planes, stride=1, bit_width_w=4, bit_width_a=4):
-        super().__init__()
-        self.conv1 = QuantConv2d(in_planes, planes, kernel_size=1, stride=1, padding=0,
-                                 bit_width_w=bit_width_w, bit_width_a=bit_width_a)
-        self.conv2 = QuantConv2d(planes, planes, kernel_size=3, stride=stride, padding=1,
-                                 bit_width_w=bit_width_w, bit_width_a=bit_width_a)
-        self.conv3 = QuantConv2d(planes, planes * self.expansion, kernel_size=1, stride=1, padding=0,
-                                 bit_width_w=bit_width_w, bit_width_a=bit_width_a)
-
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_planes != planes * self.expansion:
-            self.shortcut = nn.Sequential(
-                QuantConv2d(in_planes, planes * self.expansion, kernel_size=1, stride=stride, padding=0,
-                            bit_width_w=bit_width_w, bit_width_a=bit_width_a),
-            )
-
-    def forward(self, x):
-        out = self.conv1(x)
-        out = self.conv2(out)
-        out = self.conv3(out)
-        out = out + self.shortcut(x)
-        return out
-
-class ResNet50PACT(nn.Module):
-    def __init__(self, num_classes=1000, bit_width_w=4, bit_width_a=4):
-        super().__init__()
-        self.in_planes = 64
-
-        # Stem
-        self.conv1 = QuantConv2d(3, 64, kernel_size=7, stride=2, padding=3,
-                                 bit_width_w=bit_width_w, bit_width_a=bit_width_a)
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-
-        # Layers (3, 4, 6, 3)
-        self.layer1 = self._make_layer(Bottleneck, 64, 3, stride=1,
-                                       bit_width_w=bit_width_w, bit_width_a=bit_width_a)
-        self.layer2 = self._make_layer(Bottleneck, 128, 4, stride=2,
-                                       bit_width_w=bit_width_w, bit_width_a=bit_width_a)
-        self.layer3 = self._make_layer(Bottleneck, 256, 6, stride=2,
-                                       bit_width_w=bit_width_w, bit_width_a=bit_width_a)
-        self.layer4 = self._make_layer(Bottleneck, 512, 3, stride=2,
-                                       bit_width_w=bit_width_w, bit_width_a=bit_width_a)
-
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = QuantLinear(512 * Bottleneck.expansion, num_classes,
-                              bit_width_w=bit_width_w, bit_width_a=bit_width_a)
-
-    def _make_layer(self, block, planes, num_blocks, stride, bit_width_w, bit_width_a):
-        strides = [stride] + [1] * (num_blocks - 1)
-        layers = []
-        for s in strides:
-            layers.append(block(self.in_planes, planes, s, bit_width_w, bit_width_a))
-            self.in_planes = planes * block.expansion
-        return nn.Sequential(*layers)
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.maxpool(x)
-
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
-
-        x = self.avgpool(x)
-        x = torch.flatten(x, 1)
-        x = self.fc(x)
-        return x
-
-
-# ---- Builders ----
-def build_model(cfg):
-    arch = cfg.model.architecture.lower()
-    pact = cfg.model.pact
-    bw_a = int(pact.bit_width)
-    bw_w = int(pact.bit_width)  # par défaut : même bitwidth pour W et A
-    num_classes = cfg.dataset.num_classes
-
-    if arch == "resnet20":
-        model = resnet20_pact(num_classes=num_classes, bit_width_w=bw_w, bit_width_a=bw_a)
-    elif arch == "resnet18":
-        model = resnet18_pact(num_classes=num_classes, bit_width_w=bw_w, bit_width_a=bw_a)
-    elif arch == "resnet50":
-        model = ResNet50PACT(num_classes=num_classes, bit_width_w=bw_w, bit_width_a=bw_a)
-    else:
-        raise ValueError(f"Architecture non supportée: {arch}")
-
-    # NOTE: Pour respecter strictement "quantize_first_last: false", on pourrait remplacer
-    # la première/dernière couche par des versions non quantifiées. Version simple ci-dessous :
-    if hasattr(cfg.model.pact, "quantize_first_last") and not cfg.model.pact.quantize_first_last:
-        # First conv -> déquantifier (remplacement simple : désactiver quant W en le mettant à 32 bits)
-        if hasattr(model, "conv1"):
-            model.conv1.bit_width_w = 32
-            model.conv1.act.bit_width = None  # pas de quant sur activation de la 1ère couche
-
-        # Last linear
-        if hasattr(model, "linear"):
-            model.linear.bit_width_w = 32
-            model.linear.act.bit_width = None
-        if hasattr(model, "fc"):
-            model.fc.bit_width_w = 32
-            model.fc.act.bit_width = None
-
-    return model
-
-
-def build_optimizer(cfg, model):
-    opt_name = cfg.training.optimizer.lower()
-    wd = float(cfg.training.weight_decay)
-    lr = float(cfg.training.learning_rate.initial)
-
-    if opt_name == "sgd":
-        optimizer = optim.SGD(
-            model.parameters(),
-            lr=lr,
-            momentum=float(cfg.training.momentum),
-            weight_decay=wd,
-            nesterov=False
-        )
-    elif opt_name == "adam":
-        optimizer = optim.Adam(
-            model.parameters(),
-            lr=lr,
-            weight_decay=wd,
-        )
-    else:
-        raise ValueError(f"Optimiseur non supporté: {opt_name}")
-    return optimizer
-
-
-def build_scheduler(cfg, optimizer):
-    sched = cfg.training.learning_rate
-    milestones = [int(m) for m in sched.schedule.milestones]
-    gamma = float(sched.schedule.gamma)
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
-    return scheduler
-
-
-# ---- Metrics ----
-def accuracy(output, target, topk=(1,)):
-    """Compute the top-k accuracy for the specified values of k"""
-    with torch.no_grad():
-        maxk = max(topk)
-        batch_size = target.size(0)
-
-        _, pred = output.topk(maxk, 1, True, True)
-        pred = pred.t()
-        correct = pred.eq(target.view(1, -1).expand_as(pred))
-
-        res = []
-        for k in topk:
-            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
-            res.append((correct_k.mul_(100.0 / batch_size)).item())
-        return res
-
-
-# ---- Train & Eval Loops ----
-def train_one_epoch(model, loader, criterion, optimizer, device, scaler, lambda_alpha, use_amp):
-    model.train()
-    running_loss = 0.0
-    running_acc1 = 0.0
-    running_acc5 = 0.0
-    total = 0
-
-    for images, targets in loader:
-        images = images.to(device, non_blocking=True)
-        targets = targets.to(device, non_blocking=True)
-
-        optimizer.zero_grad(set_to_none=True)
-
-        with autocast(enabled=use_amp):
-            outputs = model(images)
-            ce_loss = criterion(outputs, targets)
-
-            # L2 regularization over alpha parameters only
-            alpha_reg = alpha_regularization(model)
-            loss = ce_loss + lambda_alpha * alpha_reg
-
-        if use_amp:
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+def set_defaults(args):
+    if args.dataset == "cifar10":
+        args.model = args.model or "resnet20"
+        args.epochs = args.epochs or 200
+        args.batch_size = args.batch_size or 128
+        args.lr = args.lr or 0.1
+        args.momentum = args.momentum or 0.9
+        args.weight_decay = args.weight_decay or 2e-4
+        args.lr_milestones = args.lr_milestones or [60, 120]
+        args.lr_gamma = args.lr_gamma or 0.1
+        args.workers = args.workers or 4
+    elif args.dataset == "svhn":
+        args.model = args.model or "svhn_convnet"
+        args.epochs = args.epochs or 200
+        args.batch_size = args.batch_size or 128
+        args.lr = args.lr or 1e-3
+        args.weight_decay = args.weight_decay or 1e-7
+        args.lr_step = args.lr_step or 50
+        args.lr_gamma = args.lr_gamma or 0.5
+        args.workers = args.workers or 4
+    elif args.dataset == "imagenet":
+        if args.model is None:
+            raise ValueError("--model required for ImageNet")
+        if args.model == "alexnet_bn":
+            args.epochs = args.epochs or 100
+            args.batch_size = args.batch_size or 128
+            args.lr = args.lr or 1e-4
+            args.weight_decay = args.weight_decay or 5e-6
+            args.lr_milestones = args.lr_milestones or [56, 64]
+            args.lr_gamma = args.lr_gamma or 0.2
         else:
-            loss.backward()
-            optimizer.step()
-
-        # metrics
-        batch_size = images.size(0)
-        total += batch_size
-        running_loss += loss.item() * batch_size
-        acc1, acc5 = accuracy(outputs, targets, topk=(1, 5 if outputs.size(1) >= 5 else 1))
-        running_acc1 += acc1 * batch_size
-        running_acc5 += acc5 * batch_size
-
-    epoch_loss = running_loss / total
-    epoch_acc1 = running_acc1 / total
-    epoch_acc5 = running_acc5 / total
-    return epoch_loss, epoch_acc1, epoch_acc5
+            args.epochs = args.epochs or 110
+            args.batch_size = args.batch_size or 256
+            args.lr = args.lr or 0.1
+            args.momentum = args.momentum or 0.9
+            args.weight_decay = args.weight_decay or 1e-4
+            args.lr_milestones = args.lr_milestones or [30, 60, 85, 95]
+            args.lr_gamma = args.lr_gamma or 0.1
+        args.workers = args.workers or 8
+    return args
 
 
-@torch.no_grad()
-def evaluate(model, loader, criterion, device):
-    model.eval()
-    running_loss = 0.0
-    running_acc1 = 0.0
-    running_acc5 = 0.0
-    total = 0
-
-    for images, targets in loader:
-        images = images.to(device, non_blocking=True)
-        targets = targets.to(device, non_blocking=True)
-
-        outputs = model(images)
-        loss = criterion(outputs, targets)
-
-        batch_size = images.size(0)
-        total += batch_size
-        running_loss += loss.item() * batch_size
-        acc1, acc5 = accuracy(outputs, targets, topk=(1, 5 if outputs.size(1) >= 5 else 1))
-        running_acc1 += acc1 * batch_size
-        running_acc5 += acc5 * batch_size
-
-    epoch_loss = running_loss / total
-    epoch_acc1 = running_acc1 / total
-    epoch_acc5 = running_acc5 / total
-    return epoch_loss, epoch_acc1, epoch_acc5
+def get_alpha_parameters(model: nn.Module):
+    """Collect all PACT alpha parameters (one per activation layer)."""
+    alphas = []
+    for module in model.modules():
+        if isinstance(module, PACTActivation):
+            alphas.append(module.alpha)
+    return alphas
 
 
-def collect_alpha_stats(model):
-    vals = []
-    for n, p in model.named_parameters():
-        if "alpha" in n:
-            vals.append(p.detach().float().mean().item())
-    if len(vals) == 0:
-        return None
-    return sum(vals) / len(vals)
+def set_quantization_enabled(model: nn.Module, enabled: bool):
+    """Toggle quantization for activations and weights while preserving clipping/FP params."""
+    for module in model.modules():
+        if isinstance(module, PACTActivation):
+            module.num_bits = module.base_num_bits if enabled else None
+        if hasattr(module, "base_w_bits"):
+            module.w_bits = module.base_w_bits if enabled else None
+
+
+def build_model(name: str, num_classes: int, act_bits: int | None, w_bits: int | None, quantize_first_last: bool):
+    if name == "resnet20":
+        return models.resnet20(num_classes=num_classes, act_bits=act_bits, w_bits=w_bits, quantize_first_last=quantize_first_last)
+    if name == "svhn_convnet":
+        return models.svhn_convnet(num_classes=num_classes, act_bits=act_bits, w_bits=w_bits, quantize_first_last=quantize_first_last)
+    if name == "alexnet_bn":
+        return models.alexnet_bn(num_classes=num_classes, act_bits=act_bits, w_bits=w_bits, quantize_first_last=quantize_first_last)
+    if name == "resnet18_preact":
+        return models.preact_resnet18(num_classes=num_classes, act_bits=act_bits, w_bits=w_bits, quantize_first_last=quantize_first_last)
+    if name == "resnet50_preact":
+        return models.preact_resnet50(num_classes=num_classes, act_bits=act_bits, w_bits=w_bits, quantize_first_last=quantize_first_last)
+    raise ValueError(f"Unknown model {name}")
+
+
+def get_loaders(args):
+    if args.dataset == "cifar10":
+        return cifar10_loaders(args.data_root, args.batch_size, args.workers)
+    if args.dataset == "svhn":
+        return svhn_loaders(args.data_root, args.batch_size, args.workers)
+    if args.dataset == "imagenet":
+        return imagenet_loaders(args.data_root, args.batch_size, args.workers)
+    raise ValueError(f"Unknown dataset {args.dataset}")
+
+
+def make_optimizer(args, model, alpha_params):
+    alpha_ids = {id(p) for p in alpha_params}
+    main_params = [p for p in model.parameters() if id(p) not in alpha_ids]
+    param_groups = [
+        {"params": main_params, "weight_decay": args.weight_decay},
+        {"params": alpha_params, "weight_decay": 0.0},
+    ]
+    if args.dataset == "svhn" or args.model == "alexnet_bn":
+        return optim.Adam(param_groups, lr=args.lr, eps=1e-5)
+    return optim.SGD(param_groups, lr=args.lr, momentum=args.momentum or 0.9, weight_decay=0.0, nesterov=False)
+
+
+def make_scheduler(args, optimizer):
+    if args.dataset == "svhn":
+        return optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_step, gamma=args.lr_gamma)
+    return optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.lr_milestones, gamma=args.lr_gamma)
+
+
+def save_checkpoint(state, is_best: bool, output_dir: str, filename: str):
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, filename)
+    torch.save(state, path)
+    if is_best:
+        best_path = os.path.join(output_dir, "model_best.pth")
+        torch.save(state, best_path)
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True, help="Chemin du fichier YAML de config")
-    args = parser.parse_args()
+    args = parse_args()
+    args = set_defaults(args)
+    torch.manual_seed(args.seed)
+    device = torch.device(args.device)
+    act_bits = None if args.act_bits is None or args.act_bits <= 0 else args.act_bits
+    w_bits = None if args.w_bits is None or args.w_bits <= 0 else args.w_bits
 
-    cfg = load_config(args.config)
-
-    # Device
-    device = torch.device(cfg.hardware.device if torch.cuda.is_available() else "cpu")
-    torch.backends.cudnn.benchmark = True
-
-    # Datasets
-    train_loader, val_loader = get_dataset(
-        name=cfg.dataset.name,
-        image_size=cfg.dataset.image_size,
-        batch_size=cfg.training.batch_size,
-        num_workers=cfg.hardware.num_workers
-    )
-
-    # Model
-    model = build_model(cfg).to(device)
-
-    # Loss / Optim / Sched
+    train_loader, val_loader, num_classes = get_loaders(args)
+    model = build_model(
+        args.model,
+        num_classes=num_classes,
+        act_bits=act_bits,
+        w_bits=w_bits,
+        quantize_first_last=args.quantize_first_last,
+    ).to(device)
+    alpha_params = get_alpha_parameters(model)
+    lambda_alpha = args.lambda_alpha if args.lambda_alpha is not None else args.weight_decay
     criterion = nn.CrossEntropyLoss()
-    optimizer = build_optimizer(cfg, model)
-    scheduler = build_scheduler(cfg, optimizer)
+    optimizer = make_optimizer(args, model, alpha_params)
+    scheduler = make_scheduler(args, optimizer)
 
-    # Logger
-    save_dir = cfg.logging.save_dir
-    os.makedirs(save_dir, exist_ok=True)
-    logger = Logger(save_dir)
-    logger.log(str(cfg))
-
-    # AMP
-    use_amp = getattr(cfg.hardware, "fp16", False)
-    from torch.amp import GradScaler as CudaGradScaler
-    scaler = CudaGradScaler('cuda', enabled=use_amp)
-
-    # Training params
-    epochs = int(cfg.training.epochs)
-    lambda_alpha = float(cfg.model.pact.lambda_alpha)
-
-    best_acc1 = 0.0
-    alpha_history = []
-
-    for epoch in range(1, epochs + 1):
-        t0 = time.time()
-        train_loss, train_acc1, train_acc5 = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, scaler, lambda_alpha, use_amp
+    best_top1 = 0.0
+    for epoch in range(args.epochs):
+        quant_enabled = epoch >= args.quant_warmup_epochs
+        set_quantization_enabled(model, enabled=quant_enabled)
+        train_stats = train_one_epoch(
+            model, criterion, optimizer, train_loader, device, lambda_alpha=lambda_alpha, alpha_params=alpha_params
         )
-        val_loss, val_acc1, val_acc5 = evaluate(model, val_loader, criterion, device)
         scheduler.step()
+        val_stats = evaluate(model, criterion, val_loader, device)
 
-        # Alpha tracking
-        alpha_mean = collect_alpha_stats(model)
-        if alpha_mean is not None and getattr(cfg.logging, "plot_alpha_evolution", True):
-            alpha_history.append({"epoch": epoch, "alpha_mean": alpha_mean})
+        best_top1 = max(best_top1, val_stats["top1"])
+        alpha_vals = [a.detach().item() for a in alpha_params] if alpha_params else []
+        alpha_mean = sum(alpha_vals) / len(alpha_vals) if alpha_vals else 0.0
+        alpha_max = max(alpha_vals) if alpha_vals else 0.0
+        print(
+            f"Epoch {epoch+1:03d}/{args.epochs} | "
+            f"Train loss {train_stats['loss']:.4f} top1 {train_stats['top1']:.2f} top5 {train_stats['top5']:.2f} | "
+            f"Val loss {val_stats['loss']:.4f} top1 {val_stats['top1']:.2f} top5 {val_stats['top5']:.2f} | "
+            f"Best top1 {best_top1:.2f} | alpha mean {alpha_mean:.4f} max {alpha_max:.4f}"
+        )
 
-        # Logging
-        dt = time.time() - t0
-        logger.log(f"[{epoch:03d}/{epochs}] "
-                   f"train_loss={train_loss:.4f} acc1={train_acc1:.2f} acc5={train_acc5:.2f} | "
-                   f"val_loss={val_loss:.4f} acc1={val_acc1:.2f} acc5={val_acc5:.2f} | "
-                   f"alpha_mean={alpha_mean if alpha_mean is not None else 'NA'} | "
-                   f"{dt:.1f}s")
-        logger.log_metrics(epoch, train_loss, val_loss, {"top1": val_acc1, "top5": val_acc5})
-
-        # Checkpointing
-        is_best = val_acc1 > best_acc1
-        best_acc1 = max(best_acc1, val_acc1)
-        # Sauvegarde manuelle pour éviter dépendance à utils.logger.save_checkpoint
-        ckpt_path = os.path.join(save_dir, f"checkpoint_epoch{epoch}.pth")
-        torch.save({
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "best_acc1": best_acc1,
-            "config": cfg.__dict__,
-        }, ckpt_path)
-        if is_best:
-            best_path = os.path.join(save_dir, "best_model.pth")
-            torch.save(model.state_dict(), best_path)
-            logger.log(f"✅ New best (Top-1 {best_acc1:.2f}) — saved to {best_path}")
-
-    # Sauvegarder l’évolution de alpha si dispo
-    if len(alpha_history) > 0:
-        import json
-        with open(os.path.join(save_dir, "alpha_evolution.json"), "w") as f:
-            json.dump(alpha_history, f, indent=2)
-
-    logger.log("Training finished.")
+        if args.output_dir and ((epoch + 1) % 5 == 0 or val_stats["top1"] >= best_top1):
+            checkpoint = {
+                "epoch": epoch + 1,
+                "model_state": model.state_dict(),
+                "optimizer_state": optimizer.state_dict(),
+                "scheduler_state": scheduler.state_dict(),
+                "best_top1": best_top1,
+                "args": vars(args),
+            }
+            save_checkpoint(checkpoint, val_stats["top1"] >= best_top1, args.output_dir, f"checkpoint_{epoch+1:03d}.pth")
 
 
 if __name__ == "__main__":
