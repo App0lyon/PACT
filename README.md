@@ -8,7 +8,7 @@ pip install -r requirements.txt
 ## Datasets
 - CIFAR-10 will auto-download to `--data-root`.
 - SVHN will auto-download (train + extra are concatenated).
-- ImageNet expects the standard folder layout under `--data-root`:
+- ImageNet: if `train/` and `val/` are missing under `--data-root`, training will download `ILSVRC/imagenet-1k` via Hugging Face Datasets (requires `hf auth login` and `datasets>=2.14` for `hf://` paths) into `--data-root/hf_cache`. Otherwise it uses the standard folder layout:
   - `train/` and `val/` subdirectories with class folders.
 
 ## Training commands
@@ -25,13 +25,13 @@ python train.py --dataset svhn --output-dir runs/svhn
 
 ImageNet AlexNet+BN (Adam 1e-4, eps 1e-5, wd 5e-6, milestones 56/64, 100 epochs):
 ```
-python train.py --dataset imagenet --model alexnet_bn --data-root /path/to/imagenet --batch-size 128 --workers 8 --output-dir runs/imagenet_alexnet
+python train.py --dataset imagenet --model alexnet_bn --batch-size 128 --workers 8 --output-dir runs/imagenet_alexnet
 ```
 
 ImageNet ResNet-18/50 (pre-activation, SGD 0.1, momentum 0.9, wd 1e-4, milestones 30/60/85/95, 110 epochs):
 ```
-python train.py --dataset imagenet --model resnet18_preact --data-root /path/to/imagenet --batch-size 256 --workers 8 --output-dir runs/imagenet_r18
-python train.py --dataset imagenet --model resnet50_preact --data-root /path/to/imagenet --batch-size 256 --workers 8 --output-dir runs/imagenet_r50
+python train.py --dataset imagenet --model resnet18_preact --batch-size 256 --workers 8 --output-dir runs/imagenet_r18
+python train.py --dataset imagenet --model resnet50_preact --batch-size 256 --workers 8 --output-dir runs/imagenet_r50
 ```
 
 ### PACT activation (ReLU replaced)
@@ -50,3 +50,19 @@ python train.py --dataset imagenet --model resnet50_preact --data-root /path/to/
 - ImageNet ResNet-50 (pre-act): ~76.9 / 93.1
 
 Use these as sanity checks before adding PACT quantization.
+
+
+## Citation Information
+
+```
+@article{imagenet15russakovsky,
+    Author = {Olga Russakovsky and Jia Deng and Hao Su and Jonathan Krause and Sanjeev Satheesh and Sean Ma and Zhiheng Huang and Andrej Karpathy and Aditya Khosla and Michael Bernstein and Alexander C. Berg and Li Fei-Fei},
+    Title = { {ImageNet Large Scale Visual Recognition Challenge} },
+    Year = {2015},
+    journal   = {International Journal of Computer Vision (IJCV)},
+    doi = {10.1007/s11263-015-0816-y},
+    volume={115},
+    number={3},
+    pages={211-252}
+}
+```
